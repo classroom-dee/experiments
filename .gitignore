@@ -3,3 +3,8 @@
 **/__pycache__
 
 simulations/results/**
+
+*.exe
+*.zip
+*.png
+.env

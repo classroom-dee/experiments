@@ -1,0 +1,9 @@
+*.png
+*.csv
+*.env
+
+# artifacts and scaffolding
+data/*
+!data/.gitkeep
+grafana-data/*
+!grafana-data/.gitkeep
