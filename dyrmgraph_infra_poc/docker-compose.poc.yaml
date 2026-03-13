@@ -1,29 +1,11 @@
 # check mem for docker!
 # docker run --rm "debian:bookworm-slim" bash -c 'numfmt --to iec $(echo $(($(getconf _PHYS_PAGES) * $(getconf PAGE_SIZE))))'
-
-
-# AIRFLOW_IMAGE_NAME           - Docker image name used to run Airflow.
-#                                Default: apache/airflow:3.1.8
-# AIRFLOW_UID                  - User ID in Airflow containers
-#                                Default: 50000
-# AIRFLOW_PROJ_DIR             - Base path to which all the files will be volumed.
-#                                Default: .
-# _AIRFLOW_WWW_USER_USERNAME   - Username for the administrator account (if requested).
-#                                Default: airflow
-# _AIRFLOW_WWW_USER_PASSWORD   - Password for the administrator account (if requested).
-#                                Default: airflow
-# _PIP_ADDITIONAL_REQUIREMENTS - Additional PIP requirements to add when starting all containers.
-#                                Use this option ONLY for quick checks. Installing requirements at container
-#                                startup is done EVERY TIME the service is started.
-#                                A better way is to build a custom image or extend the official image
-#                                as described in https://airflow.apache.org/docs/docker-stack/build.html.
-#                                Default: ''
 ---
 x-airflow-common:
   &airflow-common
   image: ${AIRFLOW_IMAGE_NAME:?${ERROR_MESSAGE}}
   build:
-    context: .
+    context: ${AIRFLOW_PROJ_DIR}
     dockerfile: poc.Dockerfile
     args:
       PROVIDERS: ${AIRFLOW_DEV_PROVIDERS:-}
@@ -43,21 +25,14 @@ x-airflow-common:
     AIRFLOW__CORE__EXECUTION_API_SERVER_URL: 'http://airflow-apiserver:8080/execution/'
     AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW__API_AUTH__JWT_SECRET:-airflow_jwt_secret}
     AIRFLOW__API_AUTH__JWT_ISSUER: ${AIRFLOW__API_AUTH__JWT_ISSUER:-airflow}
-    # yamllint disable rule:line-length
-    # Use simple http server on scheduler for health checks
-    # See https://airflow.apache.org/docs/apache-airflow/stable/administration-and-deployment/logging-monitoring/check-health.html#scheduler-health-check-server
-    # yamllint enable rule:line-length
     AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
-    # WARNING: Use _PIP_ADDITIONAL_REQUIREMENTS option ONLY for a quick checks
-    # for other purpose (development, test and especially production usage) build/extend Airflow image.
     _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-}
-    # The following line can be used to set a custom config file, stored in the local config folder
     AIRFLOW_CONFIG: '/opt/airflow/config/airflow.cfg'
   volumes:
-    - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
-    - ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs
-    - ${AIRFLOW_PROJ_DIR:-.}/config:/opt/airflow/config
-    - ${AIRFLOW_PROJ_DIR:-.}/plugins:/opt/airflow/plugins
+    - ${AIRFLOW_PROJ_DIR:?${ERROR_MESSAGE}}/dags:/opt/airflow/dags
+    - ${AIRFLOW_PROJ_DIR:?${ERROR_MESSAGE}}/logs:/opt/airflow/logs
+    - ${AIRFLOW_PROJ_DIR:?${ERROR_MESSAGE}}/config:/opt/airflow/config
+    - ${AIRFLOW_PROJ_DIR:?${ERROR_MESSAGE}}/plugins:/opt/airflow/plugins
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on:
     &airflow-common-depends-on
@@ -153,8 +128,6 @@ services:
       start_period: 30s
     environment:
       <<: *airflow-common-env
-      # Required to handle warm shutdown of the celery workers properly
-      # See https://airflow.apache.org/docs/docker-stack/entrypoint.html#signal-propagation
       DUMB_INIT_SETSID: "0"
     restart: always
     depends_on:
@@ -278,7 +251,6 @@ services:
     environment:
       <<: *airflow-common-env
       CONNECTION_CHECK_MAX_COUNT: "0"
-    # Workaround for entrypoint issue. See: https://github.com/apache/airflow/issues/16252
     command:
       - bash
       - -c
@@ -286,9 +258,6 @@ services:
     depends_on:
       <<: *airflow-common-depends-on
 
-  # You can enable flower by adding "--profile flower" option e.g. docker-compose --profile flower up
-  # or by explicitly targeted on the command line e.g. docker-compose up flower.
-  # See: https://docs.docker.com/compose/profiles/
   flower:
     <<: *airflow-common
     command: celery flower
@@ -307,6 +276,90 @@ services:
       <<: *airflow-common-depends-on
       airflow-init:
         condition: service_completed_successfully
+  
+  spark-iceberg:
+    image: tabulario/spark-iceberg
+    profiles:
+      - lakehouse
+    environment:
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      # AWS_REGION: us-east-1
+    # yamllint disable rule:line-length
+    # S3FileIO + Rest Fixture: for multi query engine setup (spark + trino + flink + snowfloke etc etc)
+    # but i only use spark, hence s3a + no need for iceberg rest fixture, init with config is fine
+    command: |
+      start-thriftserver.sh
+        --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions
+        --conf spark.sql.catalog.local=org.apache.iceberg.spark.SparkCatalog
+        --conf spark.sql.catalog.local.type=hadoop
+        --conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem
+        --conf spark.sql.catalog.local.catalog-impl=org.apache.iceberg.hadoop.HadoopCatalog
+        --conf spark.sql.catalog.local.io-impl=org.apache.iceberg.hadoop.HadoopFileIO
+
+        --conf spark.sql.catalog.local.warehouse=s3a://warehouse/
+        --conf spark.sql.defaultCatalog=local
+        --conf spark.hadoop.fs.s3a.endpoint=http://minio:9000
+        --conf spark.hadoop.fs.s3a.access.key=$$AWS_ACCESS_KEY_ID
+        --conf spark.hadoop.fs.s3a.secret.key=$$AWS_SECRET_ACCESS_KEY
+        --conf spark.hadoop.fs.s3a.path.style.access=true
+        --conf spark.hadoop.fs.s3a.connection.ssl.enabled=false
+    # yamllint enable rule:line-length
+    ports:
+      - 10000:10000
+      - 10001:10001
+      - 8888:8888
+      - 8085:8080
+    depends_on:
+      - minio
+    volumes:
+      - ${WAREHOUSE_PATH:-.}:/home/iceberg/warehouse
+      - ${NOTEBOOK_PATH:-.}:/home/iceberg/notebooks/notebooks
+
+  minio:
+    image: quay.io/minio/minio
+    command: server /data --console-address ":9001"
+    profiles:
+      - lakehouse
+    volumes:
+      - ${WAREHOUSE_PATH:-.}:/data
+    ports:
+      - 9000:9000
+      - 9001:9001
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+
+  mc:
+    depends_on:
+      - minio
+    image: minio/mc
+    profiles:
+      - lakehouse
+    container_name: mc
+    # networks:
+    #   iceberg_net:
+    environment:
+      - AWS_ACCESS_KEY_ID=${MINIO_ROOT_USER}
+      - AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD}
+      # - AWS_REGION=us-east-1
+    entrypoint: |
+      /bin/sh -c "
+      until (/usr/bin/mc alias set minio http://minio:9000 $$AWS_ACCESS_KEY_ID $$AWS_SECRET_ACCESS_KEY) do echo '...waiting...' && sleep 1; done;
+      /usr/bin/mc rm -r --force minio/warehouse;
+      /usr/bin/mc mb minio/warehouse;
+      /usr/bin/mc policy set public minio/warehouse;
+      tail -f /dev/null
+      "
+
+  dbt:
+    # entrypoint is 'dbt'
+    image: ghcr.io/dbt-labs/dbt-spark:1.9.0
+    volumes:
+      - ${DBT_PATH:?${ERROR_MESSAGE}}/project:/usr/app
+      - ${DBT_PATH:?${ERROR_MESSAGE}}/profiles.yml:/root/.dbt/profiles.yml
+    depends_on:
+      - spark-iceberg
 
 volumes:
   dyrmgraph-poc-airflow-meta-db:
