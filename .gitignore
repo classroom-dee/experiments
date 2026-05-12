@@ -8,5 +8,6 @@ simulations/results/**
 *.zip
 *.png
 .env
+*.csv
 
 masterlist.txt
