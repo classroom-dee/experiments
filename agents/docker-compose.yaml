@@ -10,11 +10,32 @@ services:
   agent:
     image: python:3.11-slim
     working_dir: /app
+    # don't mount .env
     volumes:
       - .:/app
+    
     stdin_open: true
     tty: true
     command: bash
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_HOST=${POSTGRES_HOST}
+      - POSTGRES_PORT=${POSTGRES_PORT}
+
+  postgres:
+    image: postgres:16
+    container_name: postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "5432:5432"
+    volumes:
+      - agent_pg_data:/var/lib/postgresql/data
 
 volumes:
   ollama_data:
+  agent_pg_data:

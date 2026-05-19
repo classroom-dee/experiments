@@ -2,6 +2,8 @@ import json
 import os
 import requests
 
+from db import execute_query
+
 # MODEL = "qwen2.5:3b"
 MODEL = "dolphin3"
 
@@ -23,46 +25,46 @@ Example:
 
 Available tools:
 - list_files(path)
+- read_file(path)
+- plain_text_response(message)
+- execute_query(query)
 """
 
-messages.append({
-    "role": "system",
-    "content": SYSTEM_PROMPT
-})
+messages.append({"role": "system", "content": SYSTEM_PROMPT})
 
 
 def list_files(path="."):
     return os.listdir(path)
 
+
 def read_file(path="."):
     return open(path).read()
 
-def print_message(message):
+
+def plain_text_response(message):
     print("\nAgent:", message, "\n")
+
+
+def execute_query_tool(query):
+    return execute_query(query)
 
 
 TOOLS = {
     "list_files": list_files,
     "read_file": read_file,
-    "print_message": print_message
+    "plain_text_response": plain_text_response,
+    "execute_query": execute_query_tool,
 }
 
 
 while True:
     user = input("You: ")
 
-    messages.append({
-        "role": "user",
-        "content": user
-    })
+    messages.append({"role": "user", "content": user})
 
     r = requests.post(
         "http://ollama:11434/api/chat",
-        json={
-            "model": MODEL,
-            "messages": messages,
-            "stream": False
-        }
+        json={"model": MODEL, "messages": messages, "stream": False},
     )
 
     content = r.json()["message"]["content"]
@@ -75,24 +77,15 @@ while True:
 
         result = TOOLS[tool_name](**args)
 
-        tool_message = f"TOOL RESULT: {result}"
+        tool_message = result if isinstance(result, str) else json.dumps(result)
 
-        print_message(tool_message)
+        plain_text_response(tool_message)
 
-        messages.append({
-            "role": "assistant",
-            "content": content
-        })
+        messages.append({"role": "assistant", "content": content})
 
-        messages.append({
-            "role": "user",
-            "content": tool_message
-        })
+        messages.append({"role": "tool", "content": tool_message})
 
-    except Exception:
-        print_message(content)
+    except Exception as e:
+        plain_text_response(content, f"Error: {e}")
 
-        messages.append({
-            "role": "assistant",
-            "content": content
-        })
+        messages.append({"role": "assistant", "content": content})
